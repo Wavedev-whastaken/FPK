@@ -3,140 +3,104 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define COPY_BUF_SIZE 4096
-#define FPK_MAGIC "FPK1"
+typedef struct {
+    char magic[4];
+    uint32_t count;
+    char meta[FPK_MAX_META];
+    FPKEntry entries[FPK_MAX_FILES];
+} FPKHeader;
 
-FPK_API int fpk_pack(const char *archive, const char **files, int file_count, const char *meta) {
+static int write_all(FILE *f, const void *buf, size_t sz) {
+    return fwrite(buf, 1, sz, f) == sz;
+}
+
+static int read_all(FILE *f, void *buf, size_t sz) {
+    return fread(buf, 1, sz, f) == sz;
+}
+
+int fpk_pack(const char *archive, const char **files, int file_count, const char *meta) {
+    if (file_count <= 0 || file_count > FPK_MAX_FILES) return -1;
+
     FILE *out = fopen(archive, "wb");
-    if (!out) return 1;
+    if (!out) return -1;
 
-    fwrite(FPK_MAGIC, 1, 4, out);
-    fwrite(&file_count, 4, 1, out);
+    FPKHeader hdr = {0};
+    memcpy(hdr.magic, FPK_MAGIC, 4);
+    hdr.count = file_count;
+    if (meta) strncpy(hdr.meta, meta, FPK_MAX_META-1);
 
-    char meta_buf[FPK_MAX_META] = {0};
-    if (meta) strncpy(meta_buf, meta, FPK_MAX_META-1);
-    fwrite(meta_buf, 1, FPK_MAX_META, out);
+    size_t header_size = sizeof(FPKHeader);
+    fseek(out, header_size, SEEK_SET);
 
-    // Reserve space for entry headers
-    long entry_table_pos = ftell(out);
-    for (int i = 0; i < file_count; ++i) {
-        uint32_t nlen = 0;
-        fwrite(&nlen, 4, 1, out); // name length
-        char zero[FPK_MAX_NAME] = {0};
-        fwrite(zero, 1, FPK_MAX_NAME, out); // name
-        uint32_t zero32 = 0;
-        fwrite(&zero32, 4, 1, out); // size
-        fwrite(&zero32, 4, 1, out); // offset
-    }
-
-    // Write file data and collect entry info
-    uint32_t *sizes = malloc(file_count * sizeof(uint32_t));
-    uint32_t *offsets = malloc(file_count * sizeof(uint32_t));
-    char names[FPK_MAX_FILES][FPK_MAX_NAME];
-
-    for (int i = 0; i < file_count; ++i) {
+    for (int i = 0; i < file_count; i++) {
         FILE *in = fopen(files[i], "rb");
-        if (!in) { fclose(out); free(sizes); free(offsets); return 2; }
-        strncpy(names[i], files[i], FPK_MAX_NAME-1);
-        names[i][FPK_MAX_NAME-1] = 0;
+        if (!in) { fclose(out); return -1; }
 
         fseek(in, 0, SEEK_END);
-        sizes[i] = (uint32_t)ftell(in);
-        fseek(in, 0, SEEK_SET);
-        offsets[i] = (uint32_t)ftell(out);
+        long sz = ftell(in);
+        rewind(in);
 
-        char buf[COPY_BUF_SIZE];
-        uint32_t left = sizes[i];
-        while (left) {
-            size_t chunk = left > COPY_BUF_SIZE ? COPY_BUF_SIZE : left;
-            size_t r = fread(buf, 1, chunk, in);
-            fwrite(buf, 1, r, out);
-            left -= (uint32_t)r;
-        }
+        unsigned char *buf = malloc(sz);
+        fread(buf, 1, sz, in);
         fclose(in);
+
+        hdr.entries[i].offset = ftell(out);
+        hdr.entries[i].size = sz;
+        strncpy(hdr.entries[i].name, files[i], FPK_MAX_NAME-1);
+
+        write_all(out, buf, sz);
+        free(buf);
     }
 
-    // Write entry headers
-    fseek(out, entry_table_pos, SEEK_SET);
-    for (int i = 0; i < file_count; ++i) {
-        uint32_t nlen = (uint32_t)strlen(names[i]) + 1;
-        fwrite(&nlen, 4, 1, out);
-        fwrite(names[i], 1, nlen, out);
-        if (nlen < FPK_MAX_NAME)
-            fwrite("\0", 1, FPK_MAX_NAME - nlen, out); // pad name
-        fwrite(&sizes[i], 4, 1, out);
-        fwrite(&offsets[i], 4, 1, out);
-    }
-
-    free(sizes);
-    free(offsets);
+    fseek(out, 0, SEEK_SET);
+    write_all(out, &hdr, sizeof(hdr));
     fclose(out);
     return 0;
 }
 
-FPK_API int fpk_extract(const char *archive) {
-    FILE *in = fopen(archive, "rb");
-    if (!in) return 1;
-    char magic[5] = {0};
-    fread(magic, 1, 4, in);
-    if (strncmp(magic, FPK_MAGIC, 4)) { fclose(in); return 2; }
-    uint32_t count;
-    fread(&count, 4, 1, in);
-    char meta[FPK_MAX_META];
-    fread(meta, 1, FPK_MAX_META, in);
+int fpk_list(const char *archive) {
+    FILE *f = fopen(archive, "rb");
+    if (!f) return -1;
 
-    struct {
-        char name[FPK_MAX_NAME];
-        uint32_t size, offset;
-    } entry;
+    FPKHeader hdr;
+    if (!read_all(f, &hdr, sizeof(hdr))) { fclose(f); return -1; }
+    if (memcmp(hdr.magic, FPK_MAGIC, 4) != 0) { fclose(f); return -1; }
 
-    for (uint32_t i = 0; i < count; ++i) {
-        uint32_t nlen;
-        fread(&nlen, 4, 1, in);
-        fread(entry.name, 1, FPK_MAX_NAME, in);
-        fread(&entry.size, 4, 1, in);
-        fread(&entry.offset, 4, 1, in);
+    printf("Archive meta: %s\n", hdr.meta);
+    printf("Files: %u\n", hdr.count);
 
-        FILE *out = fopen(entry.name, "wb");
-        if (!out) continue;
-        fseek(in, entry.offset, SEEK_SET);
-        uint32_t left = entry.size;
-        char buf[COPY_BUF_SIZE];
-        while (left) {
-            size_t chunk = left > COPY_BUF_SIZE ? COPY_BUF_SIZE : left;
-            size_t r = fread(buf, 1, chunk, in);
-            fwrite(buf, 1, r, out);
-            left -= (uint32_t)r;
-        }
-        fclose(out);
-        fseek(in, (4 + FPK_MAX_NAME + 4 + 4) * (i + 1) + 4 + 4 + FPK_MAX_META, SEEK_SET);
+    for (uint32_t i = 0; i < hdr.count; i++) {
+        FPKEntry *e = &hdr.entries[i];
+        printf("%s (%u bytes)\n", e->name, e->size);
     }
-    fclose(in);
+
+    fclose(f);
     return 0;
 }
 
-FPK_API int fpk_list(const char *archive) {
-    FILE *in = fopen(archive, "rb");
-    if (!in) return 1;
-    char magic[5] = {0};
-    fread(magic, 1, 4, in);
-    if (strncmp(magic, FPK_MAGIC, 4)) { fclose(in); return 2; }
-    uint32_t count;
-    fread(&count, 4, 1, in);
-    char meta[FPK_MAX_META];
-    fread(meta, 1, FPK_MAX_META, in);
+int fpk_extract(const char *archive) {
+    FILE *f = fopen(archive, "rb");
+    if (!f) return -1;
 
-    printf("Meta: %s\nFiles:\n", meta);
-    for (uint32_t i = 0; i < count; ++i) {
-        uint32_t nlen;
-        char name[FPK_MAX_NAME];
-        uint32_t size, offset;
-        fread(&nlen, 4, 1, in);
-        fread(name, 1, FPK_MAX_NAME, in);
-        fread(&size, 4, 1, in);
-        fread(&offset, 4, 1, in);
-        printf("  %s (%u bytes)\n", name, size);
+    FPKHeader hdr;
+    if (!read_all(f, &hdr, sizeof(hdr))) { fclose(f); return -1; }
+    if (memcmp(hdr.magic, FPK_MAGIC, 4) != 0) { fclose(f); return -1; }
+
+    for (uint32_t i = 0; i < hdr.count; i++) {
+        FPKEntry *e = &hdr.entries[i];
+        fseek(f, e->offset, SEEK_SET);
+
+        unsigned char *data = malloc(e->size);
+        fread(data, 1, e->size, f);
+
+        FILE *out = fopen(e->name, "wb");
+        if (!out) { free(data); continue; }
+        fwrite(data, 1, e->size, out);
+
+        free(data);
+        fclose(out);
     }
-    fclose(in);
+
+    fclose(f);
     return 0;
 }
