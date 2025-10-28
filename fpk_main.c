@@ -5,9 +5,9 @@
 int main(int argc, char **argv) {
     if (argc < 3) {
         printf("Usage:\n");
-        printf("  fpk pack <archive.fpk> <files...>\n");
-        printf("  fpk list <archive.fpk>\n");
-        printf("  fpk extract <archive.fpk>\n");
+        printf("fpk pack <archive.fpk> <files...>\n");
+        printf("fpk list <archive.fpk>\n");
+        printf("fpk extract <archive.fpk>\n");
         return 1;
     }
 
