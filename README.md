@@ -2,6 +2,7 @@
 
 ## Overview
 **FPK** is a project that requires both the **Make** build tool and a **C compiler** to compile successfully.
+Forgot about this project whas on github 😭
 
 ## Requirements
 Before building **FPK**, make sure you have the following installed:
